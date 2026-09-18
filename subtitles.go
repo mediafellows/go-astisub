@@ -445,6 +445,7 @@ func (sa *StyleAttributes) propagateSRTAttributes() {
 	if sa.SRTColor != nil {
 		// TODO: handle non-default colors that need custom styles
 		sa.TTMLColor = sa.SRTColor
+		sa.STLColor = sa.SRTColor
 	}
 
 	switch sa.SRTPosition {
@@ -517,15 +518,17 @@ func (sa *StyleAttributes) propagateSTLAttributes() {
 			sa.WebVTTLine = fmt.Sprintf("%d%%", (sa.STLPosition.VerticalPosition-1)*100/sa.STLPosition.MaxRows)
 		}
 	}
-	// Propagate STL color to TeletextColor
+	// Propagate STL color to the other color-aware formats.
 	if sa.STLColor != nil {
 		sa.TeletextColor = sa.STLColor
+		sa.TTMLColor = sa.STLColor
 	}
 }
 
 func (sa *StyleAttributes) propagateTeletextAttributes() {
 	if sa.TeletextColor != nil {
 		sa.TTMLColor = sa.TeletextColor
+		sa.STLColor = sa.TeletextColor
 	}
 }
 

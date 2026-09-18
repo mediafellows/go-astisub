@@ -10,6 +10,8 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    env:
+      COVERALLS_TOKEN: ${{ secrets.COVERALLS_TOKEN }}
     steps:
     - uses: actions/checkout@v3
 
@@ -24,10 +26,8 @@ jobs:
     - name: Run tests
       run: go test -race -covermode atomic -coverprofile=covprofile ./...
 
-    - if: github.event_name != 'pull_request'
+    - if: github.event_name != 'pull_request' && env.COVERALLS_TOKEN != ''
       name: Send coverage
-      env:
-        COVERALLS_TOKEN: ${{ secrets.COVERALLS_TOKEN }}
       run: |
         go install github.com/mattn/goveralls@latest
         goveralls -coverprofile=covprofile -service=github

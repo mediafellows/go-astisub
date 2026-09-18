@@ -192,3 +192,10 @@ func TestPropagateSTLAttributes(t *testing.T) {
 		assert.Equal(t, "39%", sa.WebVTTLine) // (10-1)*100/23 = 39
 	})
 }
+
+func TestTeletextColorPropagatesToSTL(t *testing.T) {
+	sa := &StyleAttributes{TeletextColor: ColorCyan}
+	sa.propagateTeletextAttributes()
+	assert.Equal(t, ColorCyan, sa.STLColor)
+	assert.Equal(t, ColorCyan, sa.TTMLColor)
+}

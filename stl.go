@@ -735,22 +735,22 @@ func (li LineItem) STLString() string {
 		// Add color code prefix
 		if li.InlineStyle.STLColor != nil {
 			var colorCode byte
-			switch li.InlineStyle.STLColor {
-			case ColorBlack:
+			switch *li.InlineStyle.STLColor {
+			case *ColorBlack:
 				colorCode = 0x00
-			case ColorRed:
+			case *ColorRed:
 				colorCode = 0x01
-			case ColorGreen:
+			case *ColorGreen, *ColorLime:
 				colorCode = 0x02
-			case ColorYellow:
+			case *ColorYellow:
 				colorCode = 0x03
-			case ColorBlue:
+			case *ColorBlue:
 				colorCode = 0x04
-			case ColorMagenta:
+			case *ColorMagenta:
 				colorCode = 0x05
-			case ColorCyan:
+			case *ColorCyan:
 				colorCode = 0x06
-			case ColorWhite:
+			case *ColorWhite:
 				colorCode = 0x07
 			default:
 				colorCode = 0x07 // Default to white
