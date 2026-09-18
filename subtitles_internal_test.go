@@ -14,8 +14,35 @@ func TestColor(t *testing.T) {
 	c, err = newColorFromSSAString("12345678", 16)
 	assert.NoError(t, err)
 	assert.Equal(t, Color{Alpha: 0x12, Blue: 0x34, Green: 0x56, Red: 0x78}, *c)
-	assert.Equal(t, "785634", c.TTMLString())
+	assert.Equal(t, "#785634", c.HTMLString())
 	assert.Equal(t, "12345678", c.SSAString())
+}
+
+func TestColorHTMLRoundTrip(t *testing.T) {
+	// Recognized 6-digit hex and named colors decode to RGBA (and normalize to
+	// hex on write); every other legal expression must survive a read -> write
+	// round-trip verbatim rather than being dropped. #RRGGBBAA is legal TTML1
+	// (§8.3.2) and the form IMSC1 mandates; "transparent" and names outside the
+	// recognized set are legal TTML/TTML2.
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "rrggbb parses", in: "#00ff00", want: "#00ff00"},
+		{name: "named color normalizes to hex", in: "white", want: "#ffffff"},
+		{name: "extended named color parses", in: "silver", want: "#c0c0c0"},
+		{name: "rrggbbaa preserved", in: "#ffcc00ff", want: "#ffcc00ff"},
+		{name: "transparent preserved", in: "transparent", want: "transparent"},
+		{name: "unrecognized name preserved", in: "orange", want: "orange"},
+		{name: "functional notation preserved", in: "rgb(255,204,0)", want: "rgb(255,204,0)"},
+		{name: "empty yields nil color", in: "", want: ""},
+		{name: "blank yields nil color", in: "   ", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, newColorFromHTMLString(tc.in).HTMLString())
+		})
+	}
 }
 
 func TestParseDuration(t *testing.T) {
@@ -68,4 +95,107 @@ func TestFormatDuration(t *testing.T) {
 	assert.Equal(t, "34:17:36,789", s)
 	s = formatDuration(12*time.Hour+34*time.Minute+56*time.Second+999*time.Millisecond, ",", 2)
 	assert.Equal(t, "12:34:56,99", s)
+}
+
+func TestPropagateSTLAttributes(t *testing.T) {
+	// Test JustificationRight propagates to both WebVTTAlign and TTMLTextAlign
+	t.Run("JustificationRight", func(t *testing.T) {
+		sa := &StyleAttributes{
+			STLJustification: &JustificationRight,
+		}
+		sa.propagateSTLAttributes()
+		assert.Equal(t, "right", sa.WebVTTAlign)
+		assert.NotNil(t, sa.TTMLTextAlign)
+		assert.Equal(t, "right", *sa.TTMLTextAlign)
+	})
+
+	// Test JustificationLeft propagates to both WebVTTAlign and TTMLTextAlign
+	t.Run("JustificationLeft", func(t *testing.T) {
+		sa := &StyleAttributes{
+			STLJustification: &JustificationLeft,
+		}
+		sa.propagateSTLAttributes()
+		assert.Equal(t, "left", sa.WebVTTAlign)
+		assert.NotNil(t, sa.TTMLTextAlign)
+		assert.Equal(t, "left", *sa.TTMLTextAlign)
+	})
+
+	// Test JustificationCentered doesn't set TTMLTextAlign
+	t.Run("JustificationCentered", func(t *testing.T) {
+		sa := &StyleAttributes{
+			STLJustification: &JustificationCentered,
+		}
+		sa.propagateSTLAttributes()
+		assert.Empty(t, sa.WebVTTAlign)
+		assert.Nil(t, sa.TTMLTextAlign)
+	})
+
+	// Test nil justification doesn't set anything
+	t.Run("NoJustification", func(t *testing.T) {
+		sa := &StyleAttributes{}
+		sa.propagateSTLAttributes()
+		assert.Empty(t, sa.WebVTTAlign)
+		assert.Nil(t, sa.TTMLTextAlign)
+	})
+
+	// Test STLPosition to WebVTTLine conversion (in-vision)
+	t.Run("STLPositionInVision", func(t *testing.T) {
+		sa := &StyleAttributes{
+			STLPosition: &STLPosition{
+				VerticalPosition: 50,
+				MaxRows:          99,
+			},
+		}
+		sa.propagateSTLAttributes()
+		assert.Equal(t, "50%", sa.WebVTTLine)
+	})
+
+	// Test STLPosition to WebVTTLine conversion (teletext)
+	t.Run("STLPositionTeletext", func(t *testing.T) {
+		sa := &StyleAttributes{
+			STLPosition: &STLPosition{
+				VerticalPosition: 22,
+				MaxRows:          23,
+			},
+		}
+		sa.propagateSTLAttributes()
+		// (22-1)*100/23 = 91
+		assert.Equal(t, "91%", sa.WebVTTLine)
+	})
+
+	// Test STLPosition at row 0 for teletext (edge case)
+	t.Run("STLPositionTeletextRow0", func(t *testing.T) {
+		sa := &StyleAttributes{
+			STLPosition: &STLPosition{
+				VerticalPosition: 0,
+				MaxRows:          23,
+			},
+		}
+		sa.propagateSTLAttributes()
+		// When VerticalPosition is 0, we don't subtract 1
+		assert.Equal(t, "0%", sa.WebVTTLine)
+	})
+
+	// Test combined justification and position
+	t.Run("JustificationAndPosition", func(t *testing.T) {
+		sa := &StyleAttributes{
+			STLJustification: &JustificationRight,
+			STLPosition: &STLPosition{
+				VerticalPosition: 10,
+				MaxRows:          23,
+			},
+		}
+		sa.propagateSTLAttributes()
+		assert.Equal(t, "right", sa.WebVTTAlign)
+		assert.NotNil(t, sa.TTMLTextAlign)
+		assert.Equal(t, "right", *sa.TTMLTextAlign)
+		assert.Equal(t, "39%", sa.WebVTTLine) // (10-1)*100/23 = 39
+	})
+}
+
+func TestTeletextColorPropagatesToSTL(t *testing.T) {
+	sa := &StyleAttributes{TeletextColor: ColorCyan}
+	sa.propagateTeletextAttributes()
+	assert.Equal(t, ColorCyan, sa.STLColor)
+	assert.Equal(t, ColorCyan, sa.TTMLColor)
 }

@@ -52,6 +52,19 @@ var buf = &bytes.Buffer{}
 s2.WriteToTTML(buf)
 ```
 
+## TTML frame timing
+
+`ReadFromTTML` applies `ttp:frameRateMultiplier` when converting frame-based
+times. It accepts the standard `1000 1001` form and the legacy `1000:1001`
+form. With `ttp:timeBase="media"` (the default), the multiplier affects the
+frame part of a time expression. With `ttp:timeBase="smpte"`, it affects the
+whole nominal timecode frame count; `dropNTSC` and `dropPAL` frame codes are
+accounted for. `Metadata.Framerate` remains the nominal integer frame rate.
+
+Standalone subtitle conversion has no external SMPTE marker stream, so it
+interprets SMPTE timecodes as a continuous timeline even when `ttp:markerMode`
+is omitted or set to `discontinuous`.
+
 # Using the CLI
 
 If **astisub** has been installed properly you can:

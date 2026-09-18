@@ -175,6 +175,7 @@ func ReadFromWebVTT(i io.Reader) (o *Subtitles, err error) {
 	var comments []string
 	var index int
 	var sa = &StyleAttributes{}
+	var currentRegion *Region
 
 	for scanner.Scan() {
 		// Fetch line
@@ -185,13 +186,25 @@ func ReadFromWebVTT(i io.Reader) (o *Subtitles, err error) {
 			return
 		}
 
+		// When inside a cue's text, a line that looks like a block header
+		// (NOTE/REGION/STYLE/X-TIMESTAMP-MAP) is literal cue text, not a new
+		// block, so the guarded cases below skip themselves while inCue.
+		inCue := blockName == webvttBlockNameText
+
 		switch {
 		// Comment
-		case strings.HasPrefix(line, "NOTE "):
+		case strings.HasPrefix(line, "NOTE ") && !inCue:
 			blockName = webvttBlockNameComment
 			comments = append(comments, strings.TrimPrefix(line, "NOTE "))
 		// Empty line
 		case len(line) == 0:
+			// If we were parsing a REGION block, finalize it
+			if blockName == webvttBlockNameRegion && currentRegion != nil && currentRegion.ID != "" {
+				currentRegion.InlineStyle.propagateWebVTTAttributes()
+				o.Regions[currentRegion.ID] = currentRegion
+				currentRegion = nil
+			}
+
 			// Reset block name, if we are not in the middle of CSS.
 			// If we are in STYLE block and the CSS is empty or we meet the right brace at the end of last line,
 			// then we are not in CSS and can switch to parse next WebVTT block.
@@ -204,8 +217,13 @@ func ReadFromWebVTT(i io.Reader) (o *Subtitles, err error) {
 			// Reset WebVTTTags
 			sa.WebVTTTags = []WebVTTTag{}
 
-		// Region
-		case strings.HasPrefix(line, "Region: "):
+		// New REGION block format (W3C spec compliant)
+		case line == "REGION" && !inCue:
+			blockName = webvttBlockNameRegion
+			currentRegion = &Region{InlineStyle: &StyleAttributes{}}
+
+		// Old Region: format (backward compatibility)
+		case strings.HasPrefix(line, "Region: ") && !inCue:
 			// Add region styles
 			var r = &Region{InlineStyle: &StyleAttributes{}}
 			for _, part := range strings.Split(strings.TrimPrefix(line, "Region: "), " ") {
@@ -240,7 +258,7 @@ func ReadFromWebVTT(i io.Reader) (o *Subtitles, err error) {
 			// Add region
 			o.Regions[r.ID] = r
 		// Style
-		case strings.HasPrefix(line, "STYLE"):
+		case strings.HasPrefix(line, "STYLE") && !inCue:
 			blockName = webvttBlockNameStyle
 
 			if _, ok := o.Styles[webvttDefaultStyleID]; !ok {
@@ -271,6 +289,10 @@ func ReadFromWebVTT(i io.Reader) (o *Subtitles, err error) {
 
 			// Split line on space to get remaining of time data
 			var right = strings.Fields(left[1])
+			if len(right) == 0 {
+				err = fmt.Errorf("astisub: line %d: missing webvtt end time boundary", lineNum)
+				return
+			}
 
 			// Parse time boundaries
 			if item.StartAt, err = parseDurationWebVTT(left[0]); err != nil {
@@ -327,7 +349,7 @@ func ReadFromWebVTT(i io.Reader) (o *Subtitles, err error) {
 			// Append item
 			o.Items = append(o.Items, item)
 
-		case strings.HasPrefix(line, webvttTimestampMapHeader):
+		case strings.HasPrefix(line, webvttTimestampMapHeader) && !inCue:
 			if len(item.Lines) > 0 {
 				err = errors.New("astisub: found timestamp map after processing subtitle items")
 				return
@@ -350,6 +372,33 @@ func ReadFromWebVTT(i io.Reader) (o *Subtitles, err error) {
 			switch blockName {
 			case webvttBlockNameComment:
 				comments = append(comments, line)
+			case webvttBlockNameRegion:
+				// Parse REGION block settings (multi-line format)
+				if currentRegion != nil {
+					var split = strings.Split(line, ":")
+					if len(split) > 1 {
+						key := strings.TrimSpace(split[0])
+						value := strings.TrimSpace(split[1])
+
+						switch key {
+						case "id":
+							currentRegion.ID = value
+						case "lines":
+							if currentRegion.InlineStyle.WebVTTLines, err = strconv.Atoi(value); err != nil {
+								err = fmt.Errorf("atoi of %s failed: %w", value, err)
+								return
+							}
+						case "regionanchor":
+							currentRegion.InlineStyle.WebVTTRegionAnchor = value
+						case "scroll":
+							currentRegion.InlineStyle.WebVTTScroll = value
+						case "viewportanchor":
+							currentRegion.InlineStyle.WebVTTViewportAnchor = value
+						case "width":
+							currentRegion.InlineStyle.WebVTTWidth = value
+						}
+					}
+				}
 			case webvttBlockNameStyle:
 				sa.WebVTTStyles = append(sa.WebVTTStyles, line)
 			case webvttBlockNameText:
@@ -530,45 +579,53 @@ func (s Subtitles) WriteToWebVTT(o io.Writer) (err error) {
 
 	sort.Strings(k)
 	for _, id := range k {
-		c = append(c, []byte("Region: id="+s.Regions[id].ID)...)
-		if s.Regions[id].InlineStyle.WebVTTLines != 0 {
-			c = append(c, bytesSpace...)
-			c = append(c, []byte("lines="+strconv.Itoa(s.Regions[id].InlineStyle.WebVTTLines))...)
-		} else if s.Regions[id].Style != nil && s.Regions[id].Style.InlineStyle != nil && s.Regions[id].Style.InlineStyle.WebVTTLines != 0 {
-			c = append(c, bytesSpace...)
-			c = append(c, []byte("lines="+strconv.Itoa(s.Regions[id].Style.InlineStyle.WebVTTLines))...)
-		}
-		if s.Regions[id].InlineStyle.WebVTTRegionAnchor != "" {
-			c = append(c, bytesSpace...)
-			c = append(c, []byte("regionanchor="+s.Regions[id].InlineStyle.WebVTTRegionAnchor)...)
-		} else if s.Regions[id].Style != nil && s.Regions[id].Style.InlineStyle != nil && s.Regions[id].Style.InlineStyle.WebVTTRegionAnchor != "" {
-			c = append(c, bytesSpace...)
-			c = append(c, []byte("regionanchor="+s.Regions[id].Style.InlineStyle.WebVTTRegionAnchor)...)
-		}
-		if s.Regions[id].InlineStyle.WebVTTScroll != "" {
-			c = append(c, bytesSpace...)
-			c = append(c, []byte("scroll="+s.Regions[id].InlineStyle.WebVTTScroll)...)
-		} else if s.Regions[id].Style != nil && s.Regions[id].Style.InlineStyle != nil && s.Regions[id].Style.InlineStyle.WebVTTScroll != "" {
-			c = append(c, bytesSpace...)
-			c = append(c, []byte("scroll="+s.Regions[id].Style.InlineStyle.WebVTTScroll)...)
-		}
-		if s.Regions[id].InlineStyle.WebVTTViewportAnchor != "" {
-			c = append(c, bytesSpace...)
-			c = append(c, []byte("viewportanchor="+s.Regions[id].InlineStyle.WebVTTViewportAnchor)...)
-		} else if s.Regions[id].Style != nil && s.Regions[id].Style.InlineStyle != nil && s.Regions[id].Style.InlineStyle.WebVTTViewportAnchor != "" {
-			c = append(c, bytesSpace...)
-			c = append(c, []byte("viewportanchor="+s.Regions[id].Style.InlineStyle.WebVTTViewportAnchor)...)
-		}
-		if s.Regions[id].InlineStyle.WebVTTWidth != "" {
-			c = append(c, bytesSpace...)
-			c = append(c, []byte("width="+s.Regions[id].InlineStyle.WebVTTWidth)...)
-		} else if s.Regions[id].Style != nil && s.Regions[id].Style.InlineStyle != nil && s.Regions[id].Style.InlineStyle.WebVTTWidth != "" {
-			c = append(c, bytesSpace...)
-			c = append(c, []byte("width="+s.Regions[id].Style.InlineStyle.WebVTTWidth)...)
-		}
+		// W3C WebVTT Spec: REGION blocks use multi-line format with colon-separated settings
+		c = append(c, []byte("REGION")...)
 		c = append(c, bytesLineSeparator...)
-	}
-	if len(s.Regions) > 0 {
+		c = append(c, []byte("id:"+s.Regions[id].ID)...)
+		c = append(c, bytesLineSeparator...)
+
+		if s.Regions[id].InlineStyle.WebVTTWidth != "" {
+			c = append(c, []byte("width:"+s.Regions[id].InlineStyle.WebVTTWidth)...)
+			c = append(c, bytesLineSeparator...)
+		} else if s.Regions[id].Style != nil && s.Regions[id].Style.InlineStyle != nil && s.Regions[id].Style.InlineStyle.WebVTTWidth != "" {
+			c = append(c, []byte("width:"+s.Regions[id].Style.InlineStyle.WebVTTWidth)...)
+			c = append(c, bytesLineSeparator...)
+		}
+
+		if s.Regions[id].InlineStyle.WebVTTLines != 0 {
+			c = append(c, []byte("lines:"+strconv.Itoa(s.Regions[id].InlineStyle.WebVTTLines))...)
+			c = append(c, bytesLineSeparator...)
+		} else if s.Regions[id].Style != nil && s.Regions[id].Style.InlineStyle != nil && s.Regions[id].Style.InlineStyle.WebVTTLines != 0 {
+			c = append(c, []byte("lines:"+strconv.Itoa(s.Regions[id].Style.InlineStyle.WebVTTLines))...)
+			c = append(c, bytesLineSeparator...)
+		}
+
+		if s.Regions[id].InlineStyle.WebVTTViewportAnchor != "" {
+			c = append(c, []byte("viewportanchor:"+s.Regions[id].InlineStyle.WebVTTViewportAnchor)...)
+			c = append(c, bytesLineSeparator...)
+		} else if s.Regions[id].Style != nil && s.Regions[id].Style.InlineStyle != nil && s.Regions[id].Style.InlineStyle.WebVTTViewportAnchor != "" {
+			c = append(c, []byte("viewportanchor:"+s.Regions[id].Style.InlineStyle.WebVTTViewportAnchor)...)
+			c = append(c, bytesLineSeparator...)
+		}
+
+		if s.Regions[id].InlineStyle.WebVTTRegionAnchor != "" {
+			c = append(c, []byte("regionanchor:"+s.Regions[id].InlineStyle.WebVTTRegionAnchor)...)
+			c = append(c, bytesLineSeparator...)
+		} else if s.Regions[id].Style != nil && s.Regions[id].Style.InlineStyle != nil && s.Regions[id].Style.InlineStyle.WebVTTRegionAnchor != "" {
+			c = append(c, []byte("regionanchor:"+s.Regions[id].Style.InlineStyle.WebVTTRegionAnchor)...)
+			c = append(c, bytesLineSeparator...)
+		}
+
+		if s.Regions[id].InlineStyle.WebVTTScroll != "" {
+			c = append(c, []byte("scroll:"+s.Regions[id].InlineStyle.WebVTTScroll)...)
+			c = append(c, bytesLineSeparator...)
+		} else if s.Regions[id].Style != nil && s.Regions[id].Style.InlineStyle != nil && s.Regions[id].Style.InlineStyle.WebVTTScroll != "" {
+			c = append(c, []byte("scroll:"+s.Regions[id].Style.InlineStyle.WebVTTScroll)...)
+			c = append(c, bytesLineSeparator...)
+		}
+
+		// Add blank line after each REGION block
 		c = append(c, bytesLineSeparator...)
 	}
 
@@ -694,7 +751,7 @@ func (li LineItem) webVTTBytes(previous, next *LineItem) (c []byte) {
 		}
 		// Only use TTMLColor if we don't have WebVTT color tags
 		if !hasColorTags && li.InlineStyle.TTMLColor != nil {
-			color = cssColor(*li.InlineStyle.TTMLColor)
+			color = li.InlineStyle.TTMLColor.WebVTTString()
 		}
 	}
 
@@ -724,54 +781,4 @@ func (li LineItem) webVTTBytes(previous, next *LineItem) (c []byte) {
 		c = append(c, []byte("</c>")...)
 	}
 	return
-}
-
-func cssColor(rgb string) string {
-	colors := map[string]string{
-		"#00ffff": "cyan",    // narrator, thought
-		"#ffff00": "yellow",  // out of vision
-		"#ff0000": "red",     // noises
-		"#ff00ff": "magenta", // song
-		"#00ff00": "lime",    // foreign speak
-	}
-	return colors[strings.ToLower(rgb)] // returning the empty string is ok
-}
-
-func newColorFromWebVTTString(color string) (*Color, error) {
-	switch color {
-	case "black":
-		return ColorBlack, nil
-	case "red":
-		return ColorRed, nil
-	case "green":
-		return ColorGreen, nil
-	case "yellow":
-		return ColorYellow, nil
-	case "blue":
-		return ColorBlue, nil
-	case "magenta":
-		return ColorMagenta, nil
-	case "cyan":
-		return ColorCyan, nil
-	case "white":
-		return ColorWhite, nil
-	case "silver":
-		return ColorSilver, nil
-	case "gray":
-		return ColorGray, nil
-	case "maroon":
-		return ColorMaroon, nil
-	case "olive":
-		return ColorOlive, nil
-	case "lime":
-		return ColorLime, nil
-	case "teal":
-		return ColorTeal, nil
-	case "navy":
-		return ColorNavy, nil
-	case "purple":
-		return ColorPurple, nil
-	default:
-		return nil, fmt.Errorf("unknown color class %s", color)
-	}
 }

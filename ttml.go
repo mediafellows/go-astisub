@@ -4,6 +4,8 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math"
+	"math/big"
 	"regexp"
 	"sort"
 	"strconv"
@@ -61,14 +63,74 @@ type TTMLInBody struct {
 // TTMLIn represents an input TTML that must be unmarshaled
 // We split it from the output TTML as we can't add strict namespace without breaking retrocompatibility
 type TTMLIn struct {
-	Framerate int            `xml:"frameRate,attr"`
-	Lang      string         `xml:"lang,attr"`
-	Metadata  TTMLInMetadata `xml:"head>metadata"`
-	Regions   []TTMLInRegion `xml:"head>layout>region"`
-	Styles    []TTMLInStyle  `xml:"head>styling>style"`
-	Body      TTMLInBody     `xml:"body"`
-	Tickrate  int            `xml:"tickRate,attr"`
-	XMLName   xml.Name       `xml:"tt"`
+	DropMode            string         `xml:"dropMode,attr"`
+	Framerate           int            `xml:"frameRate,attr"`
+	FrameRateMultiplier *string        `xml:"frameRateMultiplier,attr"`
+	Lang                string         `xml:"lang,attr"`
+	Metadata            TTMLInMetadata `xml:"head>metadata"`
+	Regions             []TTMLInRegion `xml:"head>layout>region"`
+	Styles              []TTMLInStyle  `xml:"head>styling>style"`
+	Body                TTMLInBody     `xml:"body"`
+	Tickrate            int            `xml:"tickRate,attr"`
+	TimeBase            string         `xml:"timeBase,attr"`
+	XMLName             xml.Name       `xml:"tt"`
+}
+
+type ttmlTiming struct {
+	frameRate             int64
+	multiplierNumerator   int64
+	multiplierDenominator int64
+	timeBase              string
+	dropMode              string
+}
+
+func (t TTMLIn) timing() (o ttmlTiming, err error) {
+	o.frameRate = int64(t.Framerate)
+	if o.frameRate == 0 {
+		// TTML defaults to 30 fps when no application-specific rate applies.
+		o.frameRate = 30
+	} else if o.frameRate < 0 {
+		return o, fmt.Errorf("astisub: invalid TTML frameRate %d", o.frameRate)
+	}
+
+	o.multiplierNumerator, o.multiplierDenominator = 1, 1
+	if t.FrameRateMultiplier != nil {
+		parts := strings.Fields(*t.FrameRateMultiplier)
+		if len(parts) == 1 && strings.Contains(parts[0], ":") {
+			// Older TTML files, including the existing fixtures, use "1:1".
+			parts = strings.Split(parts[0], ":")
+		}
+		if len(parts) != 2 {
+			return o, fmt.Errorf("astisub: invalid TTML frameRateMultiplier %q", *t.FrameRateMultiplier)
+		}
+		if o.multiplierNumerator, err = strconv.ParseInt(parts[0], 10, 64); err != nil || o.multiplierNumerator <= 0 {
+			return o, fmt.Errorf("astisub: invalid TTML frameRateMultiplier numerator %q", parts[0])
+		}
+		if o.multiplierDenominator, err = strconv.ParseInt(parts[1], 10, 64); err != nil || o.multiplierDenominator <= 0 {
+			return o, fmt.Errorf("astisub: invalid TTML frameRateMultiplier denominator %q", parts[1])
+		}
+	}
+
+	o.timeBase = t.TimeBase
+	if o.timeBase == "" {
+		o.timeBase = "media"
+	}
+	switch o.timeBase {
+	case "media", "smpte", "clock":
+	default:
+		return o, fmt.Errorf("astisub: invalid TTML timeBase %q", o.timeBase)
+	}
+
+	o.dropMode = t.DropMode
+	if o.dropMode == "" {
+		o.dropMode = "nonDrop"
+	}
+	switch o.dropMode {
+	case "nonDrop", "dropNTSC", "dropPAL":
+	default:
+		return o, fmt.Errorf("astisub: invalid TTML dropMode %q", o.dropMode)
+	}
+	return o, nil
 }
 
 // metadata returns the Metadata of the TTML
@@ -121,30 +183,35 @@ type TTMLInStyleAttributes struct {
 // StyleAttributes converts TTMLInStyleAttributes into a StyleAttributes
 func (s TTMLInStyleAttributes) styleAttributes() (o *StyleAttributes) {
 	o = &StyleAttributes{
-		TTMLBackgroundColor: s.BackgroundColor,
-		TTMLColor:           s.Color,
-		TTMLDirection:       s.Direction,
-		TTMLDisplay:         s.Display,
-		TTMLDisplayAlign:    s.DisplayAlign,
-		TTMLExtent:          s.Extent,
-		TTMLFontFamily:      s.FontFamily,
-		TTMLFontSize:        s.FontSize,
-		TTMLFontStyle:       s.FontStyle,
-		TTMLFontWeight:      s.FontWeight,
-		TTMLLineHeight:      s.LineHeight,
-		TTMLOpacity:         s.Opacity,
-		TTMLOrigin:          s.Origin,
-		TTMLOverflow:        s.Overflow,
-		TTMLPadding:         s.Padding,
-		TTMLShowBackground:  s.ShowBackground,
-		TTMLTextAlign:       s.TextAlign,
-		TTMLTextDecoration:  s.TextDecoration,
-		TTMLTextOutline:     s.TextOutline,
-		TTMLUnicodeBidi:     s.UnicodeBidi,
-		TTMLVisibility:      s.Visibility,
-		TTMLWrapOption:      s.WrapOption,
-		TTMLWritingMode:     s.WritingMode,
-		TTMLZIndex:          s.ZIndex,
+		TTMLDirection:      s.Direction,
+		TTMLDisplay:        s.Display,
+		TTMLDisplayAlign:   s.DisplayAlign,
+		TTMLExtent:         s.Extent,
+		TTMLFontFamily:     s.FontFamily,
+		TTMLFontSize:       s.FontSize,
+		TTMLFontStyle:      s.FontStyle,
+		TTMLFontWeight:     s.FontWeight,
+		TTMLLineHeight:     s.LineHeight,
+		TTMLOpacity:        s.Opacity,
+		TTMLOrigin:         s.Origin,
+		TTMLOverflow:       s.Overflow,
+		TTMLPadding:        s.Padding,
+		TTMLShowBackground: s.ShowBackground,
+		TTMLTextAlign:      s.TextAlign,
+		TTMLTextDecoration: s.TextDecoration,
+		TTMLTextOutline:    s.TextOutline,
+		TTMLUnicodeBidi:    s.UnicodeBidi,
+		TTMLVisibility:     s.Visibility,
+		TTMLWrapOption:     s.WrapOption,
+		TTMLWritingMode:    s.WritingMode,
+		TTMLZIndex:         s.ZIndex,
+	}
+	// Parse colors if present
+	if s.Color != nil {
+		o.TTMLColor = newColorFromHTMLString(*s.Color)
+	}
+	if s.BackgroundColor != nil {
+		o.TTMLBackgroundColor = newColorFromHTMLString(*s.BackgroundColor)
 	}
 	o.propagateTTMLAttributes()
 	return
@@ -266,6 +333,8 @@ type TTMLInDuration struct {
 	d                 time.Duration
 	frames, framerate int // Framerate is in frame/s
 	ticks, tickrate   int // Tickrate is in ticks/s
+	frameText         string
+	clockFrames       bool
 }
 
 // UnmarshalText implements the TextUnmarshaler interface
@@ -278,6 +347,8 @@ func (d *TTMLInDuration) UnmarshalText(i []byte) (err error) {
 	d.d = time.Duration(0)
 	d.frames = 0
 	d.ticks = 0
+	d.frameText = ""
+	d.clockFrames = false
 
 	// Check offset time
 	text := string(i)
@@ -297,6 +368,7 @@ func (d *TTMLInDuration) UnmarshalText(i []byte) (err error) {
 			d.ticks = int(value)
 		} else if metric == "f" {
 			d.frames = int(value)
+			d.frameText = matches[1]
 		} else {
 			// Get timebase
 			var timebase time.Duration
@@ -328,6 +400,8 @@ func (d *TTMLInDuration) UnmarshalText(i []byte) (err error) {
 			err = fmt.Errorf("astisub: atoi %s failed: %w", s, err)
 			return
 		}
+		d.frameText = s
+		d.clockFrames = true
 
 		// Update text
 		text = text[:indexes[0]] + ".000"
@@ -349,6 +423,66 @@ func (d TTMLInDuration) duration() (o time.Duration) {
 	return
 }
 
+// durationWithTiming converts supported TTML time expressions to elapsed time.
+func (d TTMLInDuration) durationWithTiming(t ttmlTiming) (time.Duration, error) {
+	if d.frameText == "" {
+		return d.duration(), nil
+	}
+
+	frames, ok := new(big.Rat).SetString(d.frameText)
+	if !ok || frames.Sign() < 0 {
+		return 0, fmt.Errorf("astisub: invalid TTML frame count %q", d.frameText)
+	}
+	if d.clockFrames && frames.Cmp(new(big.Rat).SetInt64(t.frameRate)) >= 0 {
+		return 0, fmt.Errorf("astisub: TTML frame code %q exceeds frameRate %d", d.frameText, t.frameRate)
+	}
+
+	// A standalone VTT conversion has no SMPTE marker stream. As before, treat
+	// timecodes as a continuous timeline even when markerMode is omitted.
+	if t.timeBase == "smpte" && d.clockFrames {
+		hours := int64(d.d / time.Hour)
+		minutes := int64((d.d % time.Hour) / time.Minute)
+		seconds := int64((d.d % time.Minute) / time.Second)
+		var dropped int64
+		switch t.dropMode {
+		case "dropNTSC":
+			if seconds == 0 && minutes%10 != 0 && d.frames < 2 {
+				return 0, fmt.Errorf("astisub: invalid dropped NTSC frame code %q", d.frameText)
+			}
+			dropped = (hours*54 + minutes - minutes/10) * 2
+		case "dropPAL":
+			if seconds == 0 && minutes%2 == 0 && minutes%20 != 0 && d.frames < 4 {
+				return 0, fmt.Errorf("astisub: invalid dropped PAL frame code %q", d.frameText)
+			}
+			dropped = (hours*27 + minutes/2 - minutes/20) * 4
+		}
+		counted := new(big.Int).Mul(big.NewInt(int64(d.d/time.Second)), big.NewInt(t.frameRate))
+		counted.Sub(counted, big.NewInt(dropped))
+		frames.Add(frames, new(big.Rat).SetInt(counted))
+		return t.frameDuration(frames)
+	}
+
+	frameDuration, err := t.frameDuration(frames)
+	if err != nil {
+		return 0, err
+	}
+	if d.d > time.Duration(math.MaxInt64)-frameDuration {
+		return 0, fmt.Errorf("astisub: TTML time exceeds time.Duration range")
+	}
+	return d.d + frameDuration, nil
+}
+
+func (t ttmlTiming) frameDuration(frames *big.Rat) (time.Duration, error) {
+	numerator := new(big.Int).Mul(big.NewInt(t.multiplierDenominator), big.NewInt(int64(time.Second)))
+	denominator := new(big.Int).Mul(big.NewInt(t.frameRate), big.NewInt(t.multiplierNumerator))
+	nanoseconds := new(big.Rat).Mul(frames, new(big.Rat).SetFrac(numerator, denominator))
+	truncated := new(big.Int).Quo(nanoseconds.Num(), nanoseconds.Denom())
+	if !truncated.IsInt64() || truncated.Sign() < 0 {
+		return 0, fmt.Errorf("astisub: TTML frame time exceeds time.Duration range")
+	}
+	return time.Duration(truncated.Int64()), nil
+}
+
 // ReadFromTTML parses a .ttml content
 func ReadFromTTML(i io.Reader) (o *Subtitles, err error) {
 	// Init
@@ -359,6 +493,10 @@ func ReadFromTTML(i io.Reader) (o *Subtitles, err error) {
 	if err = xml.NewDecoder(i).Decode(&ttml); err != nil {
 		err = fmt.Errorf("astisub: xml decoding failed: %w", err)
 		return
+	}
+	timing, timingErr := ttml.timing()
+	if timingErr != nil {
+		return nil, timingErr
 	}
 
 	// Add metadata
@@ -417,10 +555,21 @@ func ReadFromTTML(i io.Reader) (o *Subtitles, err error) {
 		}
 		for _, ts := range div.Subtitles {
 			// Init item
+			if ts.Begin == nil || ts.End == nil {
+				return nil, fmt.Errorf("astisub: TTML subtitle is missing begin or end time")
+			}
 			ts.Begin.framerate = ttml.Framerate
 			ts.Begin.tickrate = ttml.Tickrate
 			ts.End.framerate = ttml.Framerate
 			ts.End.tickrate = ttml.Tickrate
+			startAt, startErr := ts.Begin.durationWithTiming(timing)
+			if startErr != nil {
+				return nil, fmt.Errorf("astisub: invalid TTML begin time: %w", startErr)
+			}
+			endAt, endErr := ts.End.durationWithTiming(timing)
+			if endErr != nil {
+				return nil, fmt.Errorf("astisub: invalid TTML end time: %w", endErr)
+			}
 
 			itemInlineStyle := ts.TTMLInStyleAttributes.styleAttributes()
 
@@ -437,9 +586,9 @@ func ReadFromTTML(i io.Reader) (o *Subtitles, err error) {
 			}
 
 			var s = &Item{
-				EndAt:       ts.End.duration(),
+				EndAt:       endAt,
 				InlineStyle: itemInlineStyle,
-				StartAt:     ts.Begin.duration(),
+				StartAt:     startAt,
 			}
 
 			// Add region
@@ -574,9 +723,18 @@ func ttmlOutStyleAttributesFromStyleAttributes(s *StyleAttributes) TTMLOutStyleA
 	if s == nil {
 		return TTMLOutStyleAttributes{}
 	}
+	var color *string
+	if s.TTMLColor != nil {
+		// Try to convert to named color first, fall back to hex
+		color = astikit.StrPtr(s.TTMLColor.HTMLString())
+	}
+	var backgroundColor *string
+	if s.TTMLBackgroundColor != nil {
+		backgroundColor = astikit.StrPtr(s.TTMLBackgroundColor.HTMLString())
+	}
 	return TTMLOutStyleAttributes{
-		BackgroundColor: s.TTMLBackgroundColor,
-		Color:           s.TTMLColor,
+		BackgroundColor: backgroundColor,
+		Color:           color,
 		Direction:       s.TTMLDirection,
 		Display:         s.TTMLDisplay,
 		DisplayAlign:    s.TTMLDisplayAlign,

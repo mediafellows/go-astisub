@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml"
+    xmlns:ttp="http://www.w3.org/ns/ttml#parameter"
+    ttp:timeBase="media" ttp:frameRate="24"
+    ttp:frameRateMultiplier="1000 1001" ttp:tickRate="4">
+  <body>
+    <div>
+      <p begin="01:53:43:19" end="01:53:44:19">A frame within media time.</p>
+      <p begin="100f" end="110f">A frame offset.</p>
+      <p begin="2.5f" end="3.5f">A fractional frame offset.</p>
+      <p begin="6t" end="8t">A tick offset.</p>
+      <p begin="00:01:02.250" end="00:01:03.250">A decimal clock time.</p>
+    </div>
+  </body>
+</tt>
