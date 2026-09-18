@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml"
+    xmlns:ttp="http://www.w3.org/ns/ttml#parameter"
+    ttp:timeBase="smpte" ttp:dropMode="nonDrop"
+    ttp:frameRate="24" ttp:frameRateMultiplier="1000 1001">
+  <body>
+    <div>
+      <p begin="00:00:02:00" end="00:00:03:00">The observatory opens.</p>
+      <p begin="00:10:00:00" end="00:10:01:00">A model planet turns.</p>
+      <p begin="01:53:43:19" end="01:53:44:19">The telescope finds a comet.</p>
+    </div>
+  </body>
+</tt>
