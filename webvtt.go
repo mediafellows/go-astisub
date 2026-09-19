@@ -662,6 +662,14 @@ func (s Subtitles) WriteToWebVTTWithOptions(o io.Writer, options WebVTTOptions) 
 			layout := *item.ttmlLayout
 			if !options.TTMLExactAlignment {
 				layout.WebVTTLine = strings.SplitN(layout.WebVTTLine, ",", 2)[0]
+				// Native percentage positioning can clip cues at the viewport
+				// edges. Snap-to-lines anchors keep the full multiline cue visible.
+				switch layout.WebVTTLine {
+				case "0%":
+					layout.WebVTTLine = "0"
+				case "100%":
+					layout.WebVTTLine = "-1"
+				}
 				if layout.WebVTTPosition != nil {
 					layout.WebVTTPosition = &WebVTTPosition{XPosition: layout.WebVTTPosition.XPosition}
 				}

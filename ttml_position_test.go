@@ -246,3 +246,25 @@ func TestTTMLPositionCompatibleOutput(t *testing.T) {
 		})
 	}
 }
+
+func TestTTMLPositionViewportEdges(t *testing.T) {
+	for _, tt := range []struct{ align, want string }{{"before", "0"}, {"after", "-1"}} {
+		t.Run(tt.align, func(t *testing.T) {
+			subs, _ := positionVTT(t, positionDocument("", `<layout><region xml:id="r" tts:displayAlign="`+tt.align+`" tts:textAlign="center"/></layout>`, `<div region="r"><p begin="1s" end="2s">Edge caption<br/>Second line</p></div>`))
+			var output bytes.Buffer
+			if err := subs.WriteToWebVTT(&output); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(output.String(), "align:center line:"+tt.want+" position:50% size:100%\nEdge caption\nSecond line") {
+				t.Fatal(output.String())
+			}
+			parsed, err := astisub.ReadFromWebVTT(strings.NewReader(output.String()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parsed.Items[0].InlineStyle.WebVTTLine != tt.want {
+				t.Fatal("edge anchor changed on roundtrip")
+			}
+		})
+	}
+}
