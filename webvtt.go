@@ -539,7 +539,22 @@ func formatDurationWebVTT(i time.Duration) string {
 }
 
 // WriteToWebVTT writes subtitles in .vtt format
-func (s Subtitles) WriteToWebVTT(o io.Writer) (err error) {
+func (s Subtitles) WriteToWebVTT(o io.Writer) error {
+	return s.WriteToWebVTTWithOptions(o, WebVTTOptions{})
+}
+
+// WebVTTOptions controls conversion of TTML geometry, not native WebVTT cues.
+type WebVTTOptions struct {
+	// TTMLExactAlignment emits line/position alignment suffixes. These give
+	// exact multiline anchors in supporting renderers, but native Chromium
+	// versions without suffix support ignore the entire setting. The default
+	// uses plain percentages and approximates center/after block alignment.
+	TTMLExactAlignment bool
+}
+
+// WriteToWebVTTWithOptions writes WebVTT with explicit TTML rendering options.
+// The existing WriteToWebVTT signature and native WebVTT behavior are preserved.
+func (s Subtitles) WriteToWebVTTWithOptions(o io.Writer, options WebVTTOptions) (err error) {
 	// Do not write anything if no subtitles
 	if len(s.Items) == 0 {
 		err = ErrNoSubtitlesToWrite
@@ -573,8 +588,19 @@ func (s Subtitles) WriteToWebVTT(o io.Writer) (err error) {
 
 	// Add regions
 	var k []string
-	for _, region := range s.Regions {
-		k = append(k, region.ID)
+	// TTML regions have already been mapped to cue settings. Native WebVTT
+	// region definitions retain their existing serialization behavior.
+	nativeRegions := false
+	for _, item := range s.Items {
+		if item.ttmlLayout == nil {
+			nativeRegions = true
+			break
+		}
+	}
+	if nativeRegions {
+		for _, region := range s.Regions {
+			k = append(k, region.ID)
+		}
 	}
 
 	sort.Strings(k)
@@ -631,6 +657,18 @@ func (s Subtitles) WriteToWebVTT(o io.Writer) (err error) {
 
 	// Loop through subtitles
 	for index, item := range s.Items {
+		if item.ttmlLayout != nil {
+			copy := *item
+			layout := *item.ttmlLayout
+			if !options.TTMLExactAlignment {
+				layout.WebVTTLine = strings.SplitN(layout.WebVTTLine, ",", 2)[0]
+				if layout.WebVTTPosition != nil {
+					layout.WebVTTPosition = &WebVTTPosition{XPosition: layout.WebVTTPosition.XPosition}
+				}
+			}
+			copy.InlineStyle, copy.Style, copy.Region = &layout, nil, nil
+			item = &copy
+		}
 		// Add comments
 		if len(item.Comments) > 0 {
 			c = append(c, []byte("NOTE ")...)

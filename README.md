@@ -114,3 +114,8 @@ If **astisub** has been installed properly you can:
 - [x] .ssa/.ass
 - [x] .teletext
 - [ ] .smi
+
+## TTML / DFXP positioning
+
+See [TTML_POSITIONING.md](TTML_POSITIONING.md) for supported placement, style
+resolution, coordinate units, playback fallbacks, and specification references.
