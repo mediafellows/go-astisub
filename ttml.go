@@ -44,8 +44,11 @@ var (
 )
 
 type TTMLInBodyDiv struct {
-	XMLName   xml.Name         `xml:"div"`
-	Subtitles []TTMLInSubtitle `xml:"p"`
+	XMLName       xml.Name         `xml:"div"`
+	Subtitles     []TTMLInSubtitle `xml:"p"`
+	Divs          []TTMLInBodyDiv  `xml:"div"`
+	resolvedStyle *StyleAttributes
+	Content       string `xml:",innerxml"`
 
 	Region string `xml:"region,attr,omitempty"`
 	Style  string `xml:"style,attr,omitempty"`
@@ -63,6 +66,8 @@ type TTMLInBody struct {
 // TTMLIn represents an input TTML that must be unmarshaled
 // We split it from the output TTML as we can't add strict namespace without breaking retrocompatibility
 type TTMLIn struct {
+	Extent              *string        `xml:"extent,attr"`
+	CellResolution      string         `xml:"cellResolution,attr"`
 	DropMode            string         `xml:"dropMode,attr"`
 	Framerate           int            `xml:"frameRate,attr"`
 	FrameRateMultiplier *string        `xml:"frameRateMultiplier,attr"`
@@ -219,8 +224,9 @@ func (s TTMLInStyleAttributes) styleAttributes() (o *StyleAttributes) {
 
 // TTMLInHeader represents an input TTML header
 type TTMLInHeader struct {
-	ID    string `xml:"id,attr,omitempty"`
-	Style string `xml:"style,attr,omitempty"`
+	Styles []TTMLInStyle `xml:"style"`
+	ID     string        `xml:"id,attr,omitempty"`
+	Style  string        `xml:"style,attr,omitempty"`
 	TTMLInStyleAttributes
 }
 
@@ -502,57 +508,49 @@ func ReadFromTTML(i io.Reader) (o *Subtitles, err error) {
 	// Add metadata
 	o.Metadata = ttml.metadata()
 
-	// Loop through styles
-	var parentStyles = make(map[string]*Style)
+	// Resolve reference chains before deriving any WebVTT geometry.
+	resolver, resolveErr := newTTMLStyleResolver(ttml.Styles)
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
 	for _, ts := range ttml.Styles {
-		var s = &Style{
-			ID:          ts.ID,
-			InlineStyle: ts.TTMLInStyleAttributes.styleAttributes(),
+		style := &Style{ID: ts.ID, InlineStyle: ts.TTMLInStyleAttributes.styleAttributes()}
+		o.Styles[style.ID] = style
+	}
+	for _, ts := range ttml.Styles {
+		style := o.Styles[ts.ID]
+		refs := strings.Fields(ts.Style)
+		if len(refs) == 1 {
+			style.Style = o.Styles[refs[0]]
 		}
-		o.Styles[s.ID] = s
-		if len(ts.Style) > 0 {
-			parentStyles[ts.Style] = s
+		if len(refs) > 1 || len(ts.Styles) > 0 {
+			style.InlineStyle = resolver.styles[ts.ID]
 		}
 	}
-
-	// Take care of parent styles
-	for id, s := range parentStyles {
-		if _, ok := o.Styles[id]; !ok {
-			err = fmt.Errorf("astisub: Style %s requested by style %s doesn't exist", id, s.ID)
-			return
-		}
-		s.Style = o.Styles[id]
-	}
-
-	// Loop through regions
+	regionStyles := make(map[string]*StyleAttributes)
 	for _, tr := range ttml.Regions {
-		var r = &Region{
-			ID:          tr.ID,
-			InlineStyle: tr.TTMLInStyleAttributes.styleAttributes(),
+		resolved, e := resolver.header(tr.TTMLInHeader)
+		if e != nil {
+			return nil, e
 		}
-		if len(tr.Style) > 0 {
-			if _, ok := o.Styles[tr.Style]; !ok {
-				err = fmt.Errorf("astisub: Style %s requested by region %s doesn't exist", tr.Style, r.ID)
-				return
-			}
-			r.Style = o.Styles[tr.Style]
+		regionStyles[tr.ID] = resolved
+		r := &Region{ID: tr.ID, InlineStyle: tr.TTMLInStyleAttributes.styleAttributes()}
+		refs := strings.Fields(tr.Style)
+		if len(refs) == 1 {
+			r.Style = o.Styles[refs[0]]
+		}
+		if len(refs) > 1 || len(tr.Styles) > 0 {
+			r.InlineStyle = resolved
 		}
 		o.Regions[r.ID] = r
 	}
-
-	// Loop through subtitles
-	bodyInlineStyle := ttml.Body.TTMLInStyleAttributes.styleAttributes()
-	for _, div := range ttml.Body.Divs {
+	divs, e := resolver.flatten(ttml.Body)
+	if e != nil {
+		return nil, e
+	}
+	for _, div := range divs {
 		divInlineStyle := div.TTMLInStyleAttributes.styleAttributes()
-
-		// Propagate styles from Body -> Div
-		divInlineStyle.merge(bodyInlineStyle)
-		if div.Region == "" {
-			div.Region = ttml.Body.Region
-		}
-		if div.Style == "" {
-			div.Style = ttml.Body.Style
-		}
+		divInlineStyle.merge(ttml.Body.TTMLInStyleAttributes.styleAttributes())
 		for _, ts := range div.Subtitles {
 			// Init item
 			if ts.Begin == nil || ts.End == nil {
@@ -571,6 +569,7 @@ func ReadFromTTML(i io.Reader) (o *Subtitles, err error) {
 				return nil, fmt.Errorf("astisub: invalid TTML end time: %w", endErr)
 			}
 
+			paragraphStyle := ts.Style
 			itemInlineStyle := ts.TTMLInStyleAttributes.styleAttributes()
 
 			// Propagate styles from Body -> Div -> Item.
@@ -600,14 +599,24 @@ func ReadFromTTML(i io.Reader) (o *Subtitles, err error) {
 				s.Region = o.Regions[ts.Region]
 			}
 
-			// Add style
-			if len(ts.Style) > 0 {
-				if _, ok := o.Styles[ts.Style]; !ok {
-					err = fmt.Errorf("astisub: Style %s requested by subtitle between %s and %s doesn't exist", ts.Style, s.StartAt, s.EndAt)
-					return
-				}
-				s.Style = o.Styles[ts.Style]
+			// Resolve the paragraph separately from its ancestors: a paragraph's
+			// referenced styles override inherited values, but not its inline styles.
+			effective, e := resolver.attributes(ts.TTMLInStyleAttributes, paragraphStyle)
+			if e != nil {
+				return nil, e
 			}
+			effective.merge(div.resolvedStyle)
+			refs := strings.Fields(ts.Style)
+			if len(refs) == 1 {
+				s.Style = o.Styles[refs[0]]
+			}
+			if len(refs) > 1 {
+				s.InlineStyle = effective
+			}
+			region := regionStyles[ts.Region]
+			// Only inheritable paragraph properties come from the region;
+			// displayAlign, extent and origin apply to the region itself.
+			s.ttmlLayout = ttmlCuePosition(ttml, region, effective)
 
 			// Remove items identation
 			lines := strings.Split(ts.Items, "\n")
@@ -650,11 +659,15 @@ func ReadFromTTML(i io.Reader) (o *Subtitles, err error) {
 
 					// Add style
 					if len(tt.Style) > 0 {
-						if _, ok := o.Styles[tt.Style]; !ok {
-							err = fmt.Errorf("astisub: Style %s requested by item with text %s doesn't exist", tt.Style, tt.Text)
-							return
+						resolved, e := resolver.attributes(tt.TTMLInStyleAttributes, tt.Style)
+						if e != nil {
+							return nil, e
 						}
-						t.Style = o.Styles[tt.Style]
+						if refs := strings.Fields(tt.Style); len(refs) == 1 {
+							t.Style = o.Styles[refs[0]]
+						} else {
+							t.InlineStyle = resolved
+						}
 					}
 
 					// Append items

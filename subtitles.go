@@ -122,6 +122,9 @@ func NewSubtitles() *Subtitles {
 
 // Item represents a text to show between 2 time boundaries with formatting
 type Item struct {
+	// Resolved TTML cue geometry is separate from the original region/style graph.
+	// Keeping it on the item also preserves placement when cues are fragmented.
+	ttmlLayout  *StyleAttributes
 	Comments    []string
 	Index       int
 	EndAt       time.Duration
