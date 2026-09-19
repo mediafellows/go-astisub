@@ -48,7 +48,9 @@ region references to the converted cues.
 alignment suffixes, so emitting those by default would lose placement again.
 The default retains top/middle/bottom coordinates but center/after positions are
 approximate for multiline text: the renderer anchors the start of the cue there.
-Content near the viewport boundary may be adjusted or clipped by the renderer.
+At the exact viewport boundaries, the default uses snap-to-lines `line:0` or
+`line:-1` to keep multiline cues visible instead of clipping at 0% or 100%.
+Other near-boundary content may still be adjusted by the renderer.
 
 Supporting renderers can opt into exact block and position anchors using the
 additive `WriteToWebVTTWithOptions` method. No duplicate settings or nonstandard
